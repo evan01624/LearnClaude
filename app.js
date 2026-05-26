@@ -257,11 +257,23 @@ function morphToNext() {
   morphFromY.set(restY);
 
   const { drawW, drawH, offX, offY } = shapeLayout();
-  const count = shape.pts.length / 2;
+  const pts   = shape.pts;
+  const count = pts.length / 2;
+  const K     = 100; // 每顆粒子取樣的候選點數，越高越接近真正最近點
+
   for (let i = 0; i < NP; i++) {
-    const pick = (Math.random() * count | 0) * 2;
-    morphTargetX[i] = offX + shape.pts[pick]     * drawW;
-    morphTargetY[i] = offY + shape.pts[pick + 1] * drawH;
+    // 從新形狀中隨機取 K 個候選點，挑離粒子當前位置最近的
+    let bestDist = Infinity, bestX = 0, bestY = 0;
+    for (let k = 0; k < K; k++) {
+      const pick = (Math.random() * count | 0) * 2;
+      const tx = offX + pts[pick]     * drawW;
+      const ty = offY + pts[pick + 1] * drawH;
+      const dx = px[i] - tx, dy = py[i] - ty;
+      const d  = dx * dx + dy * dy;
+      if (d < bestDist) { bestDist = d; bestX = tx; bestY = ty; }
+    }
+    morphTargetX[i] = bestX;
+    morphTargetY[i] = bestY;
   }
   morphStartTime = Date.now(); // 開始插值計時
 }
