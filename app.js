@@ -13,9 +13,11 @@ const FSCALE = 50;     // 滑鼠施力的放大倍率：調高手勢影響範圍
 const FRAD   = 5;      // 滑鼠施力的半徑（單位：格子數）：調高影響範圍更大
 
 // ── 粒子參數 ──────────────────────────────────────────────────────────────────
-const NP       = 8000;  // 粒子總數量
-const MAXSPD   = 15;    // 對應最紅色的速度上限（像素/幀），超過此值都顯示全紅
-const SPRING_K = 0.008; // 回歸彈力強度：0 = 不回歸，0.02 = 很快彈回，0.008 = 緩慢飄回
+const NP          = 8000;              // 粒子總數量
+const MAXSPD      = 15;               // 對應最紅色的速度上限（像素/幀），超過此值都顯示全紅
+const SPRING_K    = 0.008;            // 回歸彈力強度：0 = 不回歸，0.02 = 很快彈回，0.008 = 緩慢飄回
+const TEXTURE_SRC = 'textures/love.png'; // 形狀遮罩圖（黑色區域 = 粒子範圍），換圖只改這行
+const SHAPE_FIT   = 0.85;             // 形狀佔螢幕短邊的比例（留 margin 用）
 
 // ── 格子記憶體配置 ────────────────────────────────────────────────────────────
 // 格子實際大小是 (N+2)×(N+2)，多出來的 2 圈是邊界 ghost cell（用來處理邊界條件）
@@ -158,11 +160,69 @@ const py    = new Float32Array(NP);      // 每顆粒子的當前 y 位置（像
 const restX = new Float32Array(NP);      // 每顆粒子的靜止 x 位置（彈力目標點）
 const restY = new Float32Array(NP);      // 每顆粒子的靜止 y 位置（彈力目標點）
 
-// 初始化所有粒子，隨機散布在畫布上，並記錄靜止位置
+// 形狀快取：正規化的暗色像素座標（[x0,y0, x1,y1, ...]，值域 0~1）
+let shapePts = null;
+let shapeImgW = 1, shapeImgH = 1;
+
+// 從 TEXTURE_SRC 載入圖片，取出暗色像素作為形狀樣本
+async function loadShape() {
+  const img = await new Promise((res, rej) => {
+    const i = new Image();
+    i.onload = () => res(i);
+    i.onerror = rej;
+    i.src = TEXTURE_SRC;
+  });
+  shapeImgW = img.naturalWidth;
+  shapeImgH = img.naturalHeight;
+  const oc   = new OffscreenCanvas(shapeImgW, shapeImgH);
+  const octx = oc.getContext('2d');
+  octx.drawImage(img, 0, 0);
+  const { data } = octx.getImageData(0, 0, shapeImgW, shapeImgH);
+  const buf = [];
+  for (let y = 0; y < shapeImgH; y++) {
+    for (let x = 0; x < shapeImgW; x++) {
+      const i4 = (y * shapeImgW + x) * 4;
+      // 亮度 < 128 視為形狀內部（黑色區域）
+      if ((data[i4] + data[i4 + 1] + data[i4 + 2]) / 3 < 128)
+        buf.push(x / shapeImgW, y / shapeImgH);
+    }
+  }
+  shapePts = new Float32Array(buf);
+  initParticles(); // 圖載入完成後，用真實形狀重設靜止位置
+}
+
+// 計算形狀在螢幕上的顯示區域（aspect-ratio-fit，置中，留 margin）
+function shapeLayout() {
+  const imgAspect    = shapeImgW / shapeImgH;
+  const screenAspect = W / H;
+  let drawW, drawH;
+  if (imgAspect > screenAspect) {
+    drawW = W * SHAPE_FIT;
+    drawH = drawW / imgAspect;
+  } else {
+    drawH = H * SHAPE_FIT;
+    drawW = drawH * imgAspect;
+  }
+  return { drawW, drawH, offX: (W - drawW) / 2, offY: (H - drawH) / 2 };
+}
+
+// 初始化粒子靜止位置：有形狀快取則取樣形狀，否則隨機散布（載入前的 fallback）
 function initParticles() {
+  if (!shapePts || shapePts.length === 0 || W === 0 || H === 0) {
+    for (let i = 0; i < NP; i++) {
+      px[i] = restX[i] = Math.random() * W;
+      py[i] = restY[i] = Math.random() * H;
+    }
+    return;
+  }
+  const { drawW, drawH, offX, offY } = shapeLayout();
+  const count = shapePts.length / 2; // 暗色像素總數
   for (let i = 0; i < NP; i++) {
-    px[i] = restX[i] = Math.random() * W; // 隨機 x，同時設為靜止位置
-    py[i] = restY[i] = Math.random() * H; // 隨機 y，同時設為靜止位置
+    const pick  = (Math.random() * count | 0) * 2; // 隨機取一個暗色像素
+    restX[i] = offX + shapePts[pick]     * drawW;
+    restY[i] = offY + shapePts[pick + 1] * drawH;
+    // 粒子當前位置只在首次初始化時跟著跳（shape 載入後只更新 rest，讓彈力慢慢拉回）
+    if (px[i] === 0 && py[i] === 0) { px[i] = restX[i]; py[i] = restY[i]; }
   }
 }
 
@@ -292,5 +352,6 @@ function resize() {
 }
 
 window.addEventListener('resize', resize); // 監聽視窗大小改變
-resize(); // 第一次執行，設定畫布大小並初始化粒子
+resize(); // 第一次執行，設定畫布大小並初始化粒子（此時 shapePts 為 null，用隨機 fallback）
 loop();   // 啟動主迴圈
+loadShape(); // 非同步載入形狀圖，完成後自動呼叫 initParticles() 重設靜止位置
