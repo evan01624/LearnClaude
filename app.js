@@ -352,4 +352,26 @@ function resize() {
 window.addEventListener('resize', resize); // 監聽視窗大小改變
 resize(); // 第一次執行，設定畫布大小並初始化粒子（此時 shapePts 為 null，用隨機 fallback）
 loop();   // 啟動主迴圈
-loadShape().catch(err => console.error('[loadShape]', err)); // 非同步載入形狀圖，完成後自動呼叫 initParticles() 重設靜止位置
+loadShape().catch(err => {
+  console.warn('[loadShape] 無法讀取圖片像素（可能是 file:// 限制），改用數學愛心備用', err);
+  initHeartFallback();
+});
+
+// file:// 環境下的備用愛心：用心形方程 (x²+y²-1)³ ≤ x²y³ 取樣
+function initHeartFallback() {
+  const res = 300;
+  const buf = [];
+  for (let y = 0; y < res; y++) {
+    for (let x = 0; x < res; x++) {
+      const nx = (x / res - 0.5) * 2.6;          // 像素 x → 公式 x（-1.3 ~ 1.3）
+      const ny = (0.5 - y / res) * 2.6;          // 像素 y → 公式 y（翻轉：圖片向下，公式向上）
+      const a  = nx * nx + ny * ny - 1;
+      if (a * a * a <= nx * nx * ny * ny * ny)
+        buf.push(x / res, y / res);
+    }
+  }
+  shapePts  = new Float32Array(buf);
+  shapeImgW = 1;
+  shapeImgH = 1;
+  initParticles();
+}
