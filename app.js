@@ -397,6 +397,7 @@ function loop() {
   }
 
   // ── 5. 更新並繪製每顆粒子 ──
+  ctx.globalCompositeOperation = 'lighter'; // 加法混色：粒子重疊處亮度累加
   for (let i = 0; i < NP; i++) {
     const [ux, vy] = sampleVel(px[i], py[i]); // 在粒子當前位置取樣流體速度
 
@@ -419,6 +420,7 @@ function loop() {
     ctx.fillStyle = speedColor(spd);              // 根據速度決定顏色
     ctx.fillRect(px[i] - 1, py[i] - 1, 3, 3);   // 畫出 3×3 像素的方形粒子（比 arc 快）
   }
+  ctx.globalCompositeOperation = 'source-over'; // 還原為正常模式（背景覆蓋需要）
 
   requestAnimationFrame(loop); // 請求瀏覽器在下一幀再呼叫 loop（維持約 60fps）
 }
