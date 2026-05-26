@@ -20,7 +20,8 @@ const TEXTURES       = ['textures/0.png', 'textures/1.png']; // 形狀序列，�
 const SHAPE_FIT      = 0.85;  // 每張圖各自盡量放大，保留此比例的 margin
 const DISP_THRESHOLD = 20;    // 粒子位移超過幾像素視為「被撥開」
 const MORPH_RATIO    = 0.5;   // 超過此比例的粒子被撥開才觸發 morph
-const MORPH_COOLDOWN = 1000;  // morph 觸發後的冷卻時間（ms），期間不重複觸發
+const MORPH_COOLDOWN  = 1000;  // morph 觸發後的冷卻時間（ms），期間不重複觸發
+const MORPH_DURATION  = 2500;  // rest 位置從舊形狀插值到新形狀所需的時間（ms）
 
 // ── 格子記憶體配置 ────────────────────────────────────────────────────────────
 // 格子實際大小是 (N+2)×(N+2)，多出來的 2 圈是邊界 ghost cell（用來處理邊界條件）
@@ -166,8 +167,11 @@ const restY = new Float32Array(NP);      // 每顆粒子的靜止 y 位置（彈
 // 形狀快取陣列：每個元素 { pts: Float32Array, imgW, imgH }
 // pts 儲存正規化暗色像素座標 [x0,y0, x1,y1, ...]（值域 0~1）
 let shapeCache = [];
-let shapeIndex = 0;          // 目前顯示的圖片索引
-let morphCooldownUntil = 0;  // 下次可觸發 morph 的時間戳記（ms）
+let shapeIndex = 0;           // 目前顯示的圖片索引
+let morphCooldownUntil = 0;   // 下次可觸發 morph 的時間戳記（ms）
+let morphStartTime = -1;      // 目前 morph 的開始時間（-1 = 無進行中的 morph）
+let morphFromX = null, morphFromY = null;     // morph 開始時 restX/restY 的快照
+let morphTargetX = null, morphTargetY = null; // morph 的目標 restX/restY
 
 // 載入單張圖片，回傳 { pts, imgW, imgH }
 async function loadOneShape(src) {
@@ -219,6 +223,7 @@ function shapeLayout() {
 
 // 初始化粒子（含位置）：使用 shapeCache[shapeIndex]，無快取時隨機散布
 function initParticles() {
+  morphStartTime = -1; // resize 時中斷任何進行中的 morph
   const shape = shapeCache[shapeIndex];
   if (!shape || shape.pts.length === 0 || W === 0 || H === 0) {
     for (let i = 0; i < NP; i++) {
@@ -236,19 +241,29 @@ function initParticles() {
   }
 }
 
-// 切換到下一張圖：只更新 restX/restY，讓彈力把粒子慢慢拉過去（morph 效果）
+// 切換到下一張圖：記錄起始與目標 rest 位置，由 loop() 做 ease-in-out 插值
 function morphToNext() {
   shapeIndex = (shapeIndex + 1) % TEXTURES.length;
   morphCooldownUntil = Date.now() + MORPH_COOLDOWN;
   const shape = shapeCache[shapeIndex];
   if (!shape || shape.pts.length === 0) return;
+
+  // 第一次 morph 時才分配快照陣列
+  if (!morphFromX) {
+    morphFromX   = new Float32Array(NP); morphFromY   = new Float32Array(NP);
+    morphTargetX = new Float32Array(NP); morphTargetY = new Float32Array(NP);
+  }
+  morphFromX.set(restX); // 記錄目前 rest 位置作為插值起點
+  morphFromY.set(restY);
+
   const { drawW, drawH, offX, offY } = shapeLayout();
   const count = shape.pts.length / 2;
   for (let i = 0; i < NP; i++) {
     const pick = (Math.random() * count | 0) * 2;
-    restX[i] = offX + shape.pts[pick]     * drawW;
-    restY[i] = offY + shape.pts[pick + 1] * drawH;
+    morphTargetX[i] = offX + shape.pts[pick]     * drawW;
+    morphTargetY[i] = offY + shape.pts[pick + 1] * drawH;
   }
+  morphStartTime = Date.now(); // 開始插值計時
 }
 
 // 在流體格子中對指定螢幕座標 (sx, sy) 做雙線性插值，取得該點的速度
@@ -291,8 +306,8 @@ canvas.addEventListener('mousedown', e => {
   pointers.set('mouse', { x: e.clientX, y: e.clientY, lastX: e.clientX, lastY: e.clientY });
 });
 canvas.addEventListener('mousemove', e => { applyPointer('mouse', e.clientX, e.clientY); });
-canvas.addEventListener('mouseup',    () => { pointers.delete('mouse'); });
-canvas.addEventListener('mouseleave', () => { pointers.delete('mouse'); });
+canvas.addEventListener('mouseup',    () => { pointers.delete('mouse'); checkMorphOnRelease(); });
+canvas.addEventListener('mouseleave', () => { pointers.delete('mouse'); checkMorphOnRelease(); });
 
 canvas.addEventListener('touchstart', e => {
   e.preventDefault();
@@ -306,24 +321,29 @@ canvas.addEventListener('touchmove', e => {
 canvas.addEventListener('touchend', e => {
   e.preventDefault();
   for (const t of e.changedTouches) pointers.delete(t.identifier);
+  checkMorphOnRelease();
 }, { passive: false });
 canvas.addEventListener('touchcancel', e => {
   for (const t of e.changedTouches) pointers.delete(t.identifier);
+  checkMorphOnRelease();
 });
 
 // ── 主迴圈（每幀執行一次）────────────────────────────────────────────────────
-function loop() {
-  // ── 0. 檢查是否觸發 morph ──
-  if (shapeCache.length > 1 && Date.now() >= morphCooldownUntil) {
-    const thrSq = DISP_THRESHOLD * DISP_THRESHOLD;
-    let displaced = 0;
-    for (let i = 0; i < NP; i++) {
-      const dx = px[i] - restX[i], dy = py[i] - restY[i];
-      if (dx * dx + dy * dy > thrSq) displaced++;
-    }
-    if (displaced / NP >= MORPH_RATIO) morphToNext();
+// 所有指標放開時呼叫：檢查位移是否夠大，決定是否觸發 morph
+function checkMorphOnRelease() {
+  if (pointers.size > 0) return; // 還有手指按著，尚未全部放開
+  if (shapeCache.length <= 1) return;
+  if (Date.now() < morphCooldownUntil) return;
+  const thrSq = DISP_THRESHOLD * DISP_THRESHOLD;
+  let displaced = 0;
+  for (let i = 0; i < NP; i++) {
+    const dx = px[i] - restX[i], dy = py[i] - restY[i];
+    if (dx * dx + dy * dy > thrSq) displaced++;
   }
+  if (displaced / NP >= MORPH_RATIO) morphToNext();
+}
 
+function loop() {
   // ── 1. 對所有活躍指標施加力量 ──
   for (const ptr of pointers.values()) {
     const dx = ptr.x - ptr.lastX; // 本幀指標在 x 方向的位移（像素）
@@ -353,7 +373,18 @@ function loop() {
   ctx.fillStyle = 'rgba(2, 8, 30, 0.18)'; // 每幀用低透明度藍黑色覆蓋，讓舊粒子慢慢消失
   ctx.fillRect(0, 0, W, H);               // 覆蓋整個畫布
 
-  // ── 4. 更新並繪製每顆粒子 ──
+  // ── 4. Morph 插值：每幀把 restX/restY 往目標推進一點（smoothstep ease-in-out）──
+  if (morphStartTime >= 0) {
+    const t    = Math.min((Date.now() - morphStartTime) / MORPH_DURATION, 1);
+    const ease = t * t * (3 - 2 * t); // smoothstep：慢起、加速、慢停
+    for (let i = 0; i < NP; i++) {
+      restX[i] = morphFromX[i] + (morphTargetX[i] - morphFromX[i]) * ease;
+      restY[i] = morphFromY[i] + (morphTargetY[i] - morphFromY[i]) * ease;
+    }
+    if (t >= 1) morphStartTime = -1; // 插值完成
+  }
+
+  // ── 5. 更新並繪製每顆粒子 ──
   for (let i = 0; i < NP; i++) {
     const [ux, vy] = sampleVel(px[i], py[i]); // 在粒子當前位置取樣流體速度
 
@@ -377,7 +408,7 @@ function loop() {
     ctx.fillRect(px[i] - 1, py[i] - 1, 3, 3);   // 畫出 3×3 像素的方形粒子（比 arc 快）
   }
 
-  requestAnimationFrame(loop); // 請求瀏覽器在下一幀再呼叫 loop（維持 60fps）
+  requestAnimationFrame(loop); // 請求瀏覽器在下一幀再呼叫 loop（維持約 60fps）
 }
 
 // ── 初始化 ───────────────────────────────────────────────────────────────────
