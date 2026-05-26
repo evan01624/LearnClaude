@@ -15,9 +15,12 @@ const FRAD   = 5;      // 滑鼠施力的半徑（單位：格子數）：調高
 // ── 粒子參數 ──────────────────────────────────────────────────────────────────
 const NP          = 8000;              // 粒子總數量
 const MAXSPD      = 15;               // 對應最紅色的速度上限（像素/幀），超過此值都顯示全紅
-const SPRING_K    = 0.008;            // 回歸彈力強度：0 = 不回歸，0.02 = 很快彈回，0.008 = 緩慢飄回
-const TEXTURE_SRC = 'textures/love.png'; // 形狀遮罩圖（黑色區域 = 粒子範圍），換圖只改這行
-const SHAPE_FIT   = 0.85;             // 形狀佔螢幕短邊的比例（留 margin 用）
+const SPRING_K    = 0.02;            // 回歸彈力強度：0 = 不回歸，0.02 = 很快彈回，0.008 = 緩慢飄回
+const TEXTURES       = ['textures/0.png', 'textures/1.png']; // 形狀序列，黑色區域 = 粒子範圍
+const SHAPE_FIT      = 0.85;  // 每張圖各自盡量放大，保留此比例的 margin
+const DISP_THRESHOLD = 20;    // 粒子位移超過幾像素視為「被撥開」
+const MORPH_RATIO    = 0.5;   // 超過此比例的粒子被撥開才觸發 morph
+const MORPH_COOLDOWN = 1000;  // morph 觸發後的冷卻時間（ms），期間不重複觸發
 
 // ── 格子記憶體配置 ────────────────────────────────────────────────────────────
 // 格子實際大小是 (N+2)×(N+2)，多出來的 2 圈是邊界 ghost cell（用來處理邊界條件）
@@ -160,55 +163,64 @@ const py    = new Float32Array(NP);      // 每顆粒子的當前 y 位置（像
 const restX = new Float32Array(NP);      // 每顆粒子的靜止 x 位置（彈力目標點）
 const restY = new Float32Array(NP);      // 每顆粒子的靜止 y 位置（彈力目標點）
 
-// 形狀快取：正規化的暗色像素座標（[x0,y0, x1,y1, ...]，值域 0~1）
-let shapePts = null;
-let shapeImgW = 1, shapeImgH = 1;
+// 形狀快取陣列：每個元素 { pts: Float32Array, imgW, imgH }
+// pts 儲存正規化暗色像素座標 [x0,y0, x1,y1, ...]（值域 0~1）
+let shapeCache = [];
+let shapeIndex = 0;          // 目前顯示的圖片索引
+let morphCooldownUntil = 0;  // 下次可觸發 morph 的時間戳記（ms）
 
-// 從 TEXTURE_SRC 載入圖片，取出暗色像素作為形狀樣本
-async function loadShape() {
+// 載入單張圖片，回傳 { pts, imgW, imgH }
+async function loadOneShape(src) {
   const img = await new Promise((res, rej) => {
     const i = new Image();
     i.onload = () => res(i);
     i.onerror = rej;
-    i.src = TEXTURE_SRC;
+    i.src = src;
   });
-  shapeImgW = img.naturalWidth;
-  shapeImgH = img.naturalHeight;
-  const oc   = new OffscreenCanvas(shapeImgW, shapeImgH);
+  const iw = img.naturalWidth, ih = img.naturalHeight;
+  const oc = new OffscreenCanvas(iw, ih);
   const octx = oc.getContext('2d');
   octx.drawImage(img, 0, 0);
-  const { data } = octx.getImageData(0, 0, shapeImgW, shapeImgH);
+  const { data } = octx.getImageData(0, 0, iw, ih);
   const buf = [];
-  for (let y = 0; y < shapeImgH; y++) {
-    for (let x = 0; x < shapeImgW; x++) {
-      const i4 = (y * shapeImgW + x) * 4;
-      // 亮度 < 128 視為形狀內部（黑色區域）
+  for (let y = 0; y < ih; y++) {
+    for (let x = 0; x < iw; x++) {
+      const i4 = (y * iw + x) * 4;
       if ((data[i4] + data[i4 + 1] + data[i4 + 2]) / 3 < 128)
-        buf.push(x / shapeImgW, y / shapeImgH);
+        buf.push(x / iw, y / ih);
     }
   }
-  shapePts = new Float32Array(buf);
-  initParticles(); // 圖載入完成後，用真實形狀重設靜止位置
+  return { pts: new Float32Array(buf), imgW: iw, imgH: ih };
 }
 
-// 計算形狀在螢幕上的顯示區域（aspect-ratio-fit，置中，留 margin）
-function shapeLayout() {
-  const imgAspect    = shapeImgW / shapeImgH;
-  const screenAspect = W / H;
-  let drawW, drawH;
-  if (imgAspect > screenAspect) {
-    drawW = W * SHAPE_FIT;
-    drawH = drawW / imgAspect;
-  } else {
-    drawH = H * SHAPE_FIT;
-    drawW = drawH * imgAspect;
+// 依序載入所有圖片；第一張載入完就立即顯示，其餘在背景繼續
+async function loadAllShapes() {
+  for (let idx = 0; idx < TEXTURES.length; idx++) {
+    try {
+      shapeCache[idx] = await loadOneShape(TEXTURES[idx]);
+    } catch (err) {
+      console.warn(`[loadShape] ${TEXTURES[idx]}`, err);
+      if (idx === 0) { initHeartFallback(); continue; }
+    }
+    if (idx === 0) initParticles();
   }
+}
+
+// 計算第 shapeIndex 張圖在螢幕上的顯示區域（各自 aspect-ratio-fit，置中）
+function shapeLayout() {
+  const s = shapeCache[shapeIndex];
+  const imgW = s ? s.imgW : 1, imgH = s ? s.imgH : 1;
+  const imgAspect = imgW / imgH, screenAspect = W / H;
+  let drawW, drawH;
+  if (imgAspect > screenAspect) { drawW = W * SHAPE_FIT; drawH = drawW / imgAspect; }
+  else                          { drawH = H * SHAPE_FIT; drawW = drawH * imgAspect; }
   return { drawW, drawH, offX: (W - drawW) / 2, offY: (H - drawH) / 2 };
 }
 
-// 初始化粒子靜止位置：有形狀快取則取樣形狀，否則隨機散布（載入前的 fallback）
+// 初始化粒子（含位置）：使用 shapeCache[shapeIndex]，無快取時隨機散布
 function initParticles() {
-  if (!shapePts || shapePts.length === 0 || W === 0 || H === 0) {
+  const shape = shapeCache[shapeIndex];
+  if (!shape || shape.pts.length === 0 || W === 0 || H === 0) {
     for (let i = 0; i < NP; i++) {
       px[i] = restX[i] = Math.random() * W;
       py[i] = restY[i] = Math.random() * H;
@@ -216,11 +228,26 @@ function initParticles() {
     return;
   }
   const { drawW, drawH, offX, offY } = shapeLayout();
-  const count = shapePts.length / 2; // 暗色像素總數
+  const count = shape.pts.length / 2;
   for (let i = 0; i < NP; i++) {
-    const pick  = (Math.random() * count | 0) * 2; // 隨機取一個暗色像素
-    px[i] = restX[i] = offX + shapePts[pick]     * drawW;
-    py[i] = restY[i] = offY + shapePts[pick + 1] * drawH;
+    const pick = (Math.random() * count | 0) * 2;
+    px[i] = restX[i] = offX + shape.pts[pick]     * drawW;
+    py[i] = restY[i] = offY + shape.pts[pick + 1] * drawH;
+  }
+}
+
+// 切換到下一張圖：只更新 restX/restY，讓彈力把粒子慢慢拉過去（morph 效果）
+function morphToNext() {
+  shapeIndex = (shapeIndex + 1) % TEXTURES.length;
+  morphCooldownUntil = Date.now() + MORPH_COOLDOWN;
+  const shape = shapeCache[shapeIndex];
+  if (!shape || shape.pts.length === 0) return;
+  const { drawW, drawH, offX, offY } = shapeLayout();
+  const count = shape.pts.length / 2;
+  for (let i = 0; i < NP; i++) {
+    const pick = (Math.random() * count | 0) * 2;
+    restX[i] = offX + shape.pts[pick]     * drawW;
+    restY[i] = offY + shape.pts[pick + 1] * drawH;
   }
 }
 
@@ -286,6 +313,17 @@ canvas.addEventListener('touchcancel', e => {
 
 // ── 主迴圈（每幀執行一次）────────────────────────────────────────────────────
 function loop() {
+  // ── 0. 檢查是否觸發 morph ──
+  if (shapeCache.length > 1 && Date.now() >= morphCooldownUntil) {
+    const thrSq = DISP_THRESHOLD * DISP_THRESHOLD;
+    let displaced = 0;
+    for (let i = 0; i < NP; i++) {
+      const dx = px[i] - restX[i], dy = py[i] - restY[i];
+      if (dx * dx + dy * dy > thrSq) displaced++;
+    }
+    if (displaced / NP >= MORPH_RATIO) morphToNext();
+  }
+
   // ── 1. 對所有活躍指標施加力量 ──
   for (const ptr of pointers.values()) {
     const dx = ptr.x - ptr.lastX; // 本幀指標在 x 方向的位移（像素）
@@ -350,12 +388,9 @@ function resize() {
 }
 
 window.addEventListener('resize', resize); // 監聽視窗大小改變
-resize(); // 第一次執行，設定畫布大小並初始化粒子（此時 shapePts 為 null，用隨機 fallback）
-loop();   // 啟動主迴圈
-loadShape().catch(err => {
-  console.warn('[loadShape] 無法讀取圖片像素（可能是 file:// 限制），改用數學愛心備用', err);
-  initHeartFallback();
-});
+resize();        // 設定畫布大小（此時 shapeCache 為空，initParticles 用隨機 fallback）
+loop();          // 啟動主迴圈
+loadAllShapes(); // 非同步載入所有形狀圖，第一張載入後立即顯示
 
 // file:// 環境下的備用愛心：用心形方程 (x²+y²-1)³ ≤ x²y³ 取樣
 function initHeartFallback() {
@@ -370,8 +405,6 @@ function initHeartFallback() {
         buf.push(x / res, y / res);
     }
   }
-  shapePts  = new Float32Array(buf);
-  shapeImgW = 1;
-  shapeImgH = 1;
+  shapeCache[0] = { pts: new Float32Array(buf), imgW: 1, imgH: 1 };
   initParticles();
 }
