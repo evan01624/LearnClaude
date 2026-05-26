@@ -1,27 +1,13 @@
 <!DOCTYPE html>
-<html lang="zh-TW">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Markdown 筆記本</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Particle Playground</title>
   <link rel="stylesheet" href="style.css">
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
-  <header>
-    <h1>Markdown 筆記本</h1>
-    <button id="theme-toggle">切換深色模式</button>
-  </header>
-  <main>
-    <div class="pane">
-      <div class="pane-label">編輯</div>
-      <textarea id="editor" placeholder="在這裡輸入 Markdown..."></textarea>
-    </div>
-    <div class="pane">
-      <div class="pane-label">預覽</div>
-      <div id="preview"></div>
-    </div>
-  </main>
+  <canvas id="canvas"></canvas>
   <script src="app.js"></script>
 </body>
 </html>
