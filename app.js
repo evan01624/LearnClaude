@@ -219,10 +219,8 @@ function initParticles() {
   const count = shapePts.length / 2; // 暗色像素總數
   for (let i = 0; i < NP; i++) {
     const pick  = (Math.random() * count | 0) * 2; // 隨機取一個暗色像素
-    restX[i] = offX + shapePts[pick]     * drawW;
-    restY[i] = offY + shapePts[pick + 1] * drawH;
-    // 粒子當前位置只在首次初始化時跟著跳（shape 載入後只更新 rest，讓彈力慢慢拉回）
-    if (px[i] === 0 && py[i] === 0) { px[i] = restX[i]; py[i] = restY[i]; }
+    px[i] = restX[i] = offX + shapePts[pick]     * drawW;
+    py[i] = restY[i] = offY + shapePts[pick + 1] * drawH;
   }
 }
 
@@ -354,4 +352,4 @@ function resize() {
 window.addEventListener('resize', resize); // 監聽視窗大小改變
 resize(); // 第一次執行，設定畫布大小並初始化粒子（此時 shapePts 為 null，用隨機 fallback）
 loop();   // 啟動主迴圈
-loadShape(); // 非同步載入形狀圖，完成後自動呼叫 initParticles() 重設靜止位置
+loadShape().catch(err => console.error('[loadShape]', err)); // 非同步載入形狀圖，完成後自動呼叫 initParticles() 重設靜止位置
