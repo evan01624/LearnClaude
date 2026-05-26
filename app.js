@@ -193,52 +193,62 @@ function speedColor(spd) {
 }
 
 // ── 輸入處理 ─────────────────────────────────────────────────────────────────
-let mx = 0, my = 0;           // 當前幀滑鼠/觸控的位置
-let lastMx = 0, lastMy = 0;   // 上一幀的位置（用來算位移量 dx/dy）
-let pressing = false;          // 是否正在按下（滑鼠或觸控）
+// 用 Map 追蹤所有活躍的指標（滑鼠用固定 key 'mouse'，觸控用 touch.identifier）
+// 每個值是 { x, y, lastX, lastY }
+const pointers = new Map();
 
-// 按下時開始施力，記錄初始位置（確保第一幀 dx/dy = 0）
-canvas.addEventListener('mousedown', e => { pressing = true;  mx = e.clientX; my = e.clientY; lastMx = mx; lastMy = my; });
-// 移動時只更新位置，dx/dy 在 loop 裡計算
-canvas.addEventListener('mousemove', e => { mx = e.clientX;  my = e.clientY; });
-// 放開或離開畫布時停止施力
-canvas.addEventListener('mouseup',    () => { pressing = false; });
-canvas.addEventListener('mouseleave', () => { pressing = false; });
+function applyPointer(id, x, y) {
+  const p = pointers.get(id);
+  if (p) { p.lastX = p.x; p.lastY = p.y; p.x = x; p.y = y; }
+}
+
+canvas.addEventListener('mousedown', e => {
+  pointers.set('mouse', { x: e.clientX, y: e.clientY, lastX: e.clientX, lastY: e.clientY });
+});
+canvas.addEventListener('mousemove', e => { applyPointer('mouse', e.clientX, e.clientY); });
+canvas.addEventListener('mouseup',    () => { pointers.delete('mouse'); });
+canvas.addEventListener('mouseleave', () => { pointers.delete('mouse'); });
 
 canvas.addEventListener('touchstart', e => {
-  e.preventDefault();                              // 阻止瀏覽器預設的捲動行為
-  pressing = true;
-  mx = e.touches[0].clientX; my = e.touches[0].clientY; // 取第一個觸控點的座標
-  lastMx = mx; lastMy = my;                        // 初始化上一幀位置，避免第一幀跳動
-}, { passive: false }); // passive: false 才能在事件內呼叫 preventDefault
-canvas.addEventListener('touchmove', e => {
-  e.preventDefault();                              // 阻止捲動
-  mx = e.touches[0].clientX; my = e.touches[0].clientY;
+  e.preventDefault();
+  for (const t of e.changedTouches)
+    pointers.set(t.identifier, { x: t.clientX, y: t.clientY, lastX: t.clientX, lastY: t.clientY });
 }, { passive: false });
-canvas.addEventListener('touchend', e => { e.preventDefault(); pressing = false; }, { passive: false });
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) applyPointer(t.identifier, t.clientX, t.clientY);
+}, { passive: false });
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) pointers.delete(t.identifier);
+}, { passive: false });
+canvas.addEventListener('touchcancel', e => {
+  for (const t of e.changedTouches) pointers.delete(t.identifier);
+});
 
 // ── 主迴圈（每幀執行一次）────────────────────────────────────────────────────
 function loop() {
-  // ── 1. 施加滑鼠/觸控力量 ──
-  if (pressing) {
-    const dx = mx - lastMx; // 本幀滑鼠在 x 方向的位移（像素）
-    const dy = my - lastMy; // 本幀滑鼠在 y 方向的位移（像素）
-    // 將螢幕座標轉換成最近的格子索引（四捨五入到整數格子）
-    const gi = Math.round(1 + mx / W * N); // 滑鼠所在格子的 i 索引
-    const gj = Math.round(1 + my / H * N); // 滑鼠所在格子的 j 索引
-    for (let dj = -FRAD; dj <= FRAD; dj++) {       // 在 y 方向掃描半徑範圍內的格子
-      for (let di = -FRAD; di <= FRAD; di++) {     // 在 x 方向掃描半徑範圍內的格子
-        const d = Math.sqrt(di * di + dj * dj);    // 當前格子到滑鼠的距離（格子單位）
-        if (d > FRAD) continue;                     // 超出圓形半徑就跳過
-        const ii = gi + di, jj = gj + dj;          // 目標格子的絕對索引
-        if (ii < 1 || ii > N || jj < 1 || jj > N) continue; // 超出格子邊界就跳過
-        const f = 1 - d / FRAD;                    // 距離衰減因子：中心 = 1，邊緣 = 0（線性衰減）
-        u[IX(ii, jj)] += dx / W * FSCALE * f;      // 將 x 方向位移轉換成格子速度並施加
-        v[IX(ii, jj)] += dy / H * FSCALE * f;      // 將 y 方向位移轉換成格子速度並施加
+  // ── 1. 對所有活躍指標施加力量 ──
+  for (const ptr of pointers.values()) {
+    const dx = ptr.x - ptr.lastX; // 本幀指標在 x 方向的位移（像素）
+    const dy = ptr.y - ptr.lastY; // 本幀指標在 y 方向的位移（像素）
+    const gi = Math.round(1 + ptr.x / W * N); // 指標所在格子的 i 索引
+    const gj = Math.round(1 + ptr.y / H * N); // 指標所在格子的 j 索引
+    for (let dj = -FRAD; dj <= FRAD; dj++) {
+      for (let di = -FRAD; di <= FRAD; di++) {
+        const d = Math.sqrt(di * di + dj * dj);
+        if (d > FRAD) continue;
+        const ii = gi + di, jj = gj + dj;
+        if (ii < 1 || ii > N || jj < 1 || jj > N) continue;
+        const f = 1 - d / FRAD;
+        u[IX(ii, jj)] += dx / W * FSCALE * f;
+        v[IX(ii, jj)] += dy / H * FSCALE * f;
       }
     }
+    // 更新「上一幀位置」，供下一幀計算 dx/dy
+    ptr.lastX = ptr.x;
+    ptr.lastY = ptr.y;
   }
-  lastMx = mx; lastMy = my; // 更新「上一幀位置」，供下一幀計算 dx/dy
 
   // ── 2. 推進流體模擬一步 ──
   fluidStep();
